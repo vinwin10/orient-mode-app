@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport"
+        content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>Orient-Mode PWA App</title>
+  <link rel="manifest" href="manifest.json"/>
+  <style>
+    * { box-sizing: border-box; margin:0; padding:0 }
+    body {
+      font-family: sans-serif;
+      background: #f5f5f5;
+      height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      overflow:hidden;
+    }
+    .mode {
+      display:none;
+      width:100%; max-width:380px;
+      padding:1rem;
+      background:#fff;
+      border-radius:8px;
+      box-shadow:0 4px 12px rgba(0,0,0,0.1);
+      text-align:center;
+    }
+    .mode.active { display:block }
+    h1 { margin-bottom:.5rem }
+    input, button {
+      width:100%; margin:.5rem 0;
+      padding:.75rem; font-size:1.1rem;
+      border:1px solid #ccc; border-radius:5px;
+    }
+    #permissionsOverlay {
+      position:absolute; inset:0;
+      background:rgba(0,0,0,0.7);
+      display:flex; align-items:center;
+      justify-content:center; z-index:10;
+    }
+    #permissionsOverlay button {
+      width:80%; max-width:300px;
+      background:#fff; border:none;
+      padding:1rem; font-weight:bold;
+    }
+    audio { display:none }
+  </style>
+</head>
+<body>
+  <div id="permissionsOverlay">
+    <button id="enableBtn">Enable Motion & Location</button>
+  </div>
+
+  <!-- Alarm -->
+  <div id="alarm" class="mode">
+    <h1>⏰ Alarm Clock</h1>
+    <input type="time" id="alarmTime"/>
+    <button id="setAlarm">Set Alarm</button>
+    <p id="alarmStatus">No alarm set</p>
+  </div>
+
+  <!-- Stopwatch -->
+  <div id="stopwatch" class="mode">
+    <h1>⏱️ Stopwatch</h1>
+    <p id="swDisplay">00:00.00</p>
+    <button id="swStart">Start</button>
+    <button id="swStop">Stop</button>
+    <button id="swReset">Reset</button>
+  </div>
+
+  <!-- Timer -->
+  <div id="timer" class="mode">
+    <h1>⏲️ Timer</h1>
+    <input type="number" id="timerMinutes" placeholder="Minutes"/>
+    <button id="tStart">Start</button>
+    <p id="tDisplay">00:00</p>
+  </div>
+
+  <!-- Weather -->
+  <div id="weather" class="mode">
+    <h1>🌤️ Weather</h1>
+    <p id="locDisplay">Locating…</p>
+    <p id="weatherDisplay">Fetching…</p>
+    <button id="refreshWeather">⟳ Refresh</button>
+  </div>
+
+  <audio id="alarmSound" src="data:audio/mp3;base64,//uQx...YOUR_BASE64_AUDIO..." ></audio>
+
+  <script>
+  (function(){
+    const OWM_KEY = '1c9b0b75bd1fafa0f4e9e2324b5a7cef';
+    let lat, lon, weatherInterval, wakeLock;
+
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+
+    // Request Notification Permission
+    if ('Notification' in window) {
+      Notification.requestPermission();
+    }
+
+    // PERMISSIONS OVERLAY
+    document.getElementById('enableBtn').onclick = async()=>{
+      if (DeviceMotionEvent?.requestPermission) {
+        let m = await DeviceMotionEvent.requestPermission();
+        if (m!=='granted') return alert('Motion denied');
+      }
+      navigator.geolocation.getCurrentPosition(p=>{
+        lat=p.coords.latitude; lon=p.coords.longitude; init();
+      },_=>{
+        lat=40.7128; lon=-74.0060; init();
+      });
+      document.getElementById('permissionsOverlay').style.display='none';
+    };
+
+    // ORIENTATION HANDLER
+    window.addEventListener('orientationchange', onOrient);
+    function onOrient(){
+      let a = window.orientation;
+      hideAll();
+      if (a===0)   activate('alarm');
+      if (a===90)  activate('stopwatch');
+      if (a===180) activate('timer');
+      if (a===-90) activate('weather');
+    }
+
+    function hideAll(){
+      ['alarm','stopwatch','timer','weather']
+        .forEach(id=>document.getElementById(id).classList.remove('active'));
+      wakeLock?.release?.();
+    }
+
+    function activate(id){
+      document.getElementById(id).classList.add('active');
+      if (id!=='weather') screenWake();
+      if (id==='weather') startWeather();
+    }
+
+    // WAKE LOCK
+    async function screenWake(){
+      try { wakeLock = await navigator.wakeLock.request('screen') }
+      catch {}
+    }
+
+    // NOTIFICATIONS + VIBRATION + SOUND
+    function alertUser(msg){
+      if (Notification.permission==='granted') {
+        new Notification(msg);
+      }
+      navigator.vibrate([200,100,200]);
+      document.getElementById('alarmSound').play();
+    }
+
+    /* ─── ALARM ─── */
+    const alarmInp = document.getElementById('alarmTime');
+    const alarmSt  = document.getElementById('alarmStatus');
+    let alarmT     = localStorage.getItem('alarmT');
+    if (alarmT) alarmSt.textContent='Alarm at '+alarmT;
+    document.getElementById('setAlarm').onclick = ()=>{
+      alarmT = alarmInp.value;
+      localStorage.setItem('alarmT',alarmT);
+      alarmSt.textContent='Alarm at '+alarmT;
+    };
+    setInterval(()=>{
+      if(!alarmT) return;
+      let d=new Date(), hh=d.getHours(), mm=d.getMinutes();
+      let now=('0'+hh).slice(-2)+':'+('0'+mm).slice(-2);
+      if(now===alarmT){
+        alertUser('🔔 Alarm ringing!');
+        localStorage.removeItem('alarmT');
+        alarmT=null; alarmSt.textContent='No alarm set';
+      }
+    },1000);
+
+    /* ─── STOPWATCH ─── */
+    const swD = document.getElementById('swDisplay');
+    let swRun = localStorage.swRun==='true';
+    let swSt  = +localStorage.swSt||0;
+    let swEl  = +localStorage.swEl||0, swi;
+    function swShow(ms){
+      let cs=Math.floor(ms/10)%100, s=Math.floor(ms/1e3)%60, m=Math.floor(ms/6e4);
+      swD.textContent=`${m}:${('0'+s).slice(-2)}.${('0'+cs).slice(-2)}`;
+    }
+    function swTick(){ swShow(Date.now()-swSt); }
+    document.getElementById('swStart').onclick=()=>{
+      if(swRun) return;
+      swRun=true; swSt=Date.now()-swEl;
+      swi=setInterval(swTick,50); saveSW();
+    };
+    document.getElementById('swStop').onclick=()=>{
+      if(!swRun) return;
+      swRun=false; clearInterval(swi);
+      swEl=Date.now()-swSt; saveSW();
+    };
+    document.getElementById('swReset').onclick=()=>{
+      swRun=false; clearInterval(swi);
+      swEl=0; swSt=0; swShow(0); saveSW();
+    };
+    function saveSW(){
+      localStorage.swRun=swRun; localStorage.swSt=swSt; localStorage.swEl=swEl;
+    }
+    if(swRun) swi=setInterval(swTick,50); else swShow(swEl);
+
+    /* ─── TIMER ─── */
+    const tD = document.getElementById('tDisplay');
+    let tEnd  = +localStorage.tEnd||0;
+    let tRun  = localStorage.tRun==='true', ti;
+    function tShow(ms){
+      if(ms<0) ms=0;
+      let s=Math.floor(ms/1e3)%60, m=Math.floor(ms/6e4);
+      tD.textContent=`${('0'+m).slice(-2)}:${('0'+s).slice(-2)}`;
+    }
+    function tTick(){
+      let rem = tEnd-Date.now();
+      tShow(rem);
+      if(rem<=0){
+        clearInterval(ti); tRun=false; localStorage.removeItem('tRun');
+        alertUser('⏲️ Timer done!');
+      }
+    }
+    document.getElementById('tStart').onclick=()=>{
+      let mins=+(document.getElementById('timerMinutes').value||0);
+      tEnd=Date.now()+mins*6e4; tRun=true;
+      localStorage.tEnd=tEnd; localStorage.tRun=true;
+      ti=setInterval(tTick,200);
+    };
+    if(tRun) ti=setInterval(tTick,200); else tShow(0);
+
+    /* ─── WEATHER ─── */
+    const locD = document.getElementById('locDisplay');
+    const wD   = document.getElementById('weatherDisplay');
+    document.getElementById('refreshWeather').onclick = fetchWx;
+
+    async function fetchWx(){
+      locD.textContent='Fetching…'; wD.textContent='';
+      try {
+        let url=`https://api.openweathermap.org/data/2.5/weather`
+               +`?lat=${lat}&lon=${lon}&units=metric&appid=${OWM_KEY}`;
+        let r=await fetch(url), j=await r.json();
+        locD.textContent=`${j.name}, ${j.sys.country}`;
+        wD.innerHTML=`${j.weather[0].description}<br>🌡️ ${j.main.temp.toFixed(1)}°C`;
+      } catch {
+        locD.textContent='Weather error';
+      }
+    }
+    function startWeather(){
+      fetchWx();
+      clearInterval(weatherInterval);
+      weatherInterval=setInterval(fetchWx,5*6e4);
+    }
+
+    function init(){ onOrient() }
+
+  })();
+  </script>
+</body>
+</html>
